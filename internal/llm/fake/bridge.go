@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"io"
+	"os"
 	"strings"
 
 	"github.com/z-chenhao/erii/internal/llm"
@@ -24,7 +25,16 @@ func ValidFixture(f string) bool {
 	return false
 }
 
-func Serve(in io.Reader, out io.Writer, fixture string) error {
+func ServeRecorded(in io.Reader, out io.Writer, fixture, path string) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return serve(in, out, fixture, f)
+}
+func Serve(in io.Reader, out io.Writer, fixture string) error { return serve(in, out, fixture, nil) }
+func serve(in io.Reader, out io.Writer, fixture string, audit io.Writer) error {
 	if !ValidFixture(fixture) {
 		return llm.InvalidProviderResponse
 	}
@@ -99,6 +109,11 @@ func Serve(in io.Reader, out io.Writer, fixture string) error {
 			var request llm.GenerationRequest
 			if json.Unmarshal(r.Params, &request) != nil {
 				return llm.InvalidProviderResponse
+			}
+			if audit != nil {
+				if err = json.NewEncoder(audit).Encode(map[string]string{"generation_id": request.GenerationID, "snapshot_id": request.Snapshot.SnapshotID}); err != nil {
+					return err
+				}
 			}
 			if err = reply(struct{}{}); err != nil {
 				return err

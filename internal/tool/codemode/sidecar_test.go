@@ -21,7 +21,7 @@ func (f sinkFunc) Handle(ctx context.Context, method string, m Message) (Reply, 
 }
 func requestFixture(source string) ExecutionRequest {
 	hash := sha256.Sum256([]byte(source))
-	return ExecutionRequest{ProtocolVersion: ProtocolVersion, RuntimeVersion: RuntimeVersion, PreludeVersion: PreludeVersion, ExecutionID: "execution", ParentInvocationID: "parent", RunID: "run", Kind: "main", Tools: []tool.Spec{}, Source: source, SourceHash: hex.EncodeToString(hash[:]), Limits: DefaultLimits()}
+	return ExecutionRequest{ProtocolVersion: ProtocolVersion, RuntimeVersion: RuntimeVersion, PreludeVersion: PreludeVersion, ExecutionID: "execution", ClaimToken: "claim", ExecutionEpoch: 1, ProviderCallID: "provider-call", ParentInvocationID: "parent", RunID: "run", Kind: "main", Tools: []tool.Spec{}, Source: source, SourceHash: hex.EncodeToString(hash[:]), Limits: DefaultLimits()}
 }
 func TestRealSidecarProtocolAndExplicitOutput(t *testing.T) {
 	node, err := exec.LookPath("node")
@@ -63,7 +63,7 @@ createInterface({input:process.stdin}).on('line',line=>{
  if(m.method==='runtime.initialize')send({id:m.id,result:m.params});
  if(m.method==='execution.start'){
   request=m.params;
-  const event={protocolVersion:'1',runtimeId:'erii-js-v1',executionId:request.executionId,parentInvocationId:request.parentInvocationId,runId:request.runId,sequence:1,occurredAt:'2026-10-17T00:00:00Z',kind:'execution_completed',outcome:{kind:'completed',output:[],pendingCallIds:[]}};
+  const event={protocolVersion:'1',runtimeId:'erii-js-v2',executionId:request.executionId,parentInvocationId:request.parentInvocationId,runId:request.runId,claimToken:request.claimToken,executionEpoch:request.executionEpoch,sequence:1,occurredAt:'2026-10-17T00:00:00Z',kind:'execution_completed',outcome:{kind:'completed',output:[],pendingCallIds:[]}};
   if(MODE==='completion-without-event'){send({id:'start',result:event.outcome});return;}
   if(MODE==='forged-run') event.runId='forged';
   if(MODE==='event-gap') event.sequence=2;

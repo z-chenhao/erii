@@ -22,6 +22,8 @@ source = replaceOnce(source, 'const toolsProxy = guard(\n\t\ttools,', `const pub
   Object.freeze(publicTools);
   const toolsProxy = guard(
     publicTools,`);
+source = replaceOnce(source, 'bridge(kind, id, name, json);',
+  'bridge(kind, id, name, json, new ErrorCtor().stack);');
 source = replaceOnce(source, '// The first tool wins when two names normalize to the same identifier.',
   '// Go/Node validate the complete alias map before VM admission.');
 const start = source.indexOf('\t// key -> JSON text.');
@@ -30,7 +32,7 @@ if (start < 0 || end < 0) throw new Error('incompatible pinned Pi Store');
 source = source.slice(0, start) + `
   const handles = new WeakSet();
   function sync(method, value) {
-    const reply = parse(bridge("sync", method, stringify(value)));
+    const reply = parse(bridge("sync", method, stringify(value), new ErrorCtor().stack));
     if (reply.error) { const e = new ErrorCtor(reply.error.code); e.code = reply.error.code; throw e; }
     return reply.value;
   }

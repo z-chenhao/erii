@@ -14,6 +14,12 @@ type ToolLimits struct{ Global, Agent, Run, Provider, Tool int }
 
 func (r *Runs) ConfigureToolLimits(l ToolLimits)       { r.limits = l }
 func (r *Runs) ConfigureApprovalTTL(ttl time.Duration) { r.approvalTTL = ttl }
+func (r *Runs) approvalTime() time.Time {
+	if r.approvalClock != nil {
+		return r.approvalClock()
+	}
+	return time.Now()
+}
 func (r *Runs) approvalDuration() time.Duration {
 	if r.approvalTTL > 0 {
 		return r.approvalTTL
@@ -94,7 +100,7 @@ func (r *Runs) Decide(ctx context.Context, principal, id, hash, decision string)
 		if status == decision {
 			return nil
 		}
-		err := tx.QueryRowContext(ctx, `SELECT a.status,i.run_id FROM approval a JOIN tool_invocation i USING(invocation_id) JOIN run r USING(run_id) WHERE a.approval_id=? AND a.scope=? AND r.agent_id=? AND a.frozen_arguments_hash=? AND i.request_hash=? AND i.status='waiting' AND i.wait_reason='approval' AND r.desired_state='running' AND r.status IN ('running','waiting') AND a.expires_at>?`, id, principal, principal, hash, hash, time.Now().UnixMicro()).Scan(&status, &runID)
+		err := tx.QueryRowContext(ctx, `SELECT a.status,i.run_id FROM approval a JOIN tool_invocation i USING(invocation_id) JOIN run r USING(run_id) WHERE a.approval_id=? AND a.scope=? AND r.agent_id=? AND a.frozen_arguments_hash=? AND i.request_hash=? AND i.status='waiting' AND i.wait_reason='approval' AND r.desired_state='running' AND r.status IN ('running','waiting') AND a.expires_at>?`, id, principal, principal, hash, hash, r.approvalTime().UnixMicro()).Scan(&status, &runID)
 		if err != nil {
 			return agent.ErrConflict
 		}
@@ -104,7 +110,7 @@ func (r *Runs) Decide(ctx context.Context, principal, id, hash, decision string)
 		if status != "pending" {
 			return agent.ErrConflict
 		}
-		if _, err = tx.ExecContext(ctx, `UPDATE approval SET status=?,decision_source='local_user',decided_at=?,version=version+1 WHERE approval_id=?`, decision, time.Now().UnixMicro(), id); err != nil {
+		if _, err = tx.ExecContext(ctx, `UPDATE approval SET status=?,decision_source='local_user',decided_at=?,version=version+1 WHERE approval_id=?`, decision, r.approvalTime().UnixMicro(), id); err != nil {
 			return err
 		}
 		if err = wakeApproval(ctx, tx, runID); err != nil {
@@ -121,7 +127,7 @@ func wakeApproval(ctx context.Context, tx *sql.Tx, runID string) error {
 }
 func (r *Runs) recoverApprovals(ctx context.Context) error {
 	return r.write(ctx, func(tx *sql.Tx) error {
-		now := time.Now().UnixMicro()
+		now := r.approvalTime().UnixMicro()
 		rows, err := tx.QueryContext(ctx, `UPDATE approval SET status='expired',decided_at=?,version=version+1 WHERE status IN ('pending','approved') AND expires_at<=? AND invocation_id IN (SELECT invocation_id FROM tool_invocation WHERE status IN ('queued','waiting') AND attempt_count=0) RETURNING invocation_id`, now, now)
 		if err != nil {
 			return err

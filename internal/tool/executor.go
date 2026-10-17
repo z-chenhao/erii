@@ -23,6 +23,9 @@ type Error struct {
 }
 
 type Result struct {
+	// HostFence is an opaque, process-local completion receipt. It is never model
+	// output; only the owning Host store can construct and validate its type.
+	HostFence    any           `json:"-"`
 	Text         string        `json:"text"`
 	ArtifactRefs []string      `json:"artifact_refs,omitempty"`
 	Output       *BinaryOutput `json:"-"`

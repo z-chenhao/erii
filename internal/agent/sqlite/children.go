@@ -139,7 +139,7 @@ func (t *tools) AgentToolExecutor(ctx context.Context, id string) (tool.Result, 
 	waiting := false
 	err := t.runs.write(ctx, func(tx *sql.Tx) error {
 		waiting = false
-		if err := fence(ctx, tx, t.claim); err != nil {
+		if err := t.fence(ctx, tx); err != nil {
 			return err
 		}
 		var child, status, name string

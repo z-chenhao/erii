@@ -113,9 +113,13 @@ func Normalize(r Result) Result {
 	}
 	switch r.Error.Code {
 	case "INVALID_ARGUMENT", "NOT_FOUND", "PERMISSION_DENIED", "APPROVAL_DENIED", "TIMEOUT", "CANCELLED", "PROVIDER_UNAVAILABLE", "RESOURCE_LIMIT", "UNKNOWN_SIDE_EFFECT", "NON_DETERMINISTIC_REPLAY":
-		return Failure(r.Error.Code)
+		out := Failure(r.Error.Code)
+		out.HostFence = r.HostFence
+		return out
 	default:
-		return Failure("PROVIDER_UNAVAILABLE")
+		out := Failure("PROVIDER_UNAVAILABLE")
+		out.HostFence = r.HostFence
+		return out
 	}
 }
 func (r Result) terminal() bool { return r.Error == nil || r.Error.Code != "UNKNOWN_SIDE_EFFECT" }

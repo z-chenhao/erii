@@ -14,11 +14,22 @@ import (
 )
 
 type tools struct {
-	runs  *Runs
-	claim agent.RunClaim
+	runs      *Runs
+	claim     agent.RunClaim
+	codeOwner *codeBridge
 }
 
-func (r *Runs) ToolStore(c agent.RunClaim) tool.Store { return &tools{r, c} }
+func (t *tools) forCode(b *codeBridge) *tools {
+	return &tools{runs: t.runs, claim: t.claim, codeOwner: b}
+}
+func (t *tools) fence(ctx context.Context, tx *sql.Tx) error {
+	if t.codeOwner != nil {
+		return t.codeOwner.fence(ctx, tx)
+	}
+	return fence(ctx, tx, t.claim)
+}
+
+func (r *Runs) ToolStore(c agent.RunClaim) tool.Store { return &tools{runs: r, claim: c} }
 
 func (t *tools) Accept(ctx context.Context, exchange string, calls []llm.ToolCall, specs []tool.Spec) ([]tool.Invocation, error) {
 	return t.accept(ctx, exchange, calls, specs, "")
@@ -28,7 +39,7 @@ func (t *tools) accept(ctx context.Context, exchange string, calls []llm.ToolCal
 	out := []tool.Invocation{}
 	err := t.runs.write(ctx, func(tx *sql.Tx) error {
 		out = out[:0]
-		if err := fence(ctx, tx, t.claim); err != nil {
+		if err := t.fence(ctx, tx); err != nil {
 			return err
 		}
 		var frozen string
@@ -37,6 +48,9 @@ func (t *tools) accept(ctx context.Context, exchange string, calls []llm.ToolCal
 		}
 		current, _ := encoded(specs)
 		if frozen != current {
+			if parent != "" {
+				return tool.ErrReplay
+			}
 			return llm.ModelIncompatible
 		}
 		if parent == "" {
@@ -65,6 +79,12 @@ func (t *tools) accept(ctx context.Context, exchange string, calls []llm.ToolCal
 		}
 		for i, call := range calls {
 			request, _ := encoded(call)
+			if parent != "" {
+				request, _ = encoded(struct {
+					Call  llm.ToolCall
+					Specs []tool.Spec
+				}{call, specs})
+			}
 			hash := digest(request)
 			var inv tool.Invocation
 			var oldHash string
@@ -161,7 +181,7 @@ func (t *tools) accept(ctx context.Context, exchange string, calls []llm.ToolCal
 }
 func (t *tools) Start(ctx context.Context, id string) error {
 	return t.runs.write(ctx, func(tx *sql.Tx) error {
-		if err := fence(ctx, tx, t.claim); err != nil {
+		if err := t.fence(ctx, tx); err != nil {
 			return err
 		}
 		inv, p, err := t.load(ctx, tx, id)
@@ -180,7 +200,7 @@ func (t *tools) Start(ctx context.Context, id string) error {
 
 		if p.Risk == "high" {
 			var valid int
-			if err = tx.QueryRowContext(ctx, `SELECT count(*) FROM approval a JOIN tool_invocation i USING(invocation_id) JOIN run r USING(run_id) WHERE a.invocation_id=? AND a.status='approved' AND a.expires_at>? AND a.scope=r.agent_id AND a.frozen_arguments_hash=i.request_hash`, id, time.Now().UnixMicro()).Scan(&valid); err != nil {
+			if err = tx.QueryRowContext(ctx, `SELECT count(*) FROM approval a JOIN tool_invocation i USING(invocation_id) JOIN run r USING(run_id) WHERE a.invocation_id=? AND a.status='approved' AND a.expires_at>? AND a.scope=r.agent_id AND a.frozen_arguments_hash=i.request_hash`, id, t.runs.approvalTime().UnixMicro()).Scan(&valid); err != nil {
 				return err
 			}
 			if valid != 1 {
@@ -230,8 +250,19 @@ func (t *tools) FinishResult(ctx context.Context, id string, result tool.Result)
 func (t *tools) finish(ctx, outputCtx context.Context, id string, result tool.Result, reconcile, reject bool, out *tool.Result) error {
 	committed := false
 	err := t.runs.write(ctx, func(tx *sql.Tx) error {
-		if err := fence(ctx, tx, t.claim); err != nil {
+		if err := t.fence(ctx, tx); err != nil {
 			return err
+		}
+		// A wrapper result can commit only under the same execution owner that
+		// produced its frozen terminal receipt. Calls rejected before VM admission
+		// have no CodeExecutionState and follow ordinary Tool rejection semantics.
+		owner, _ := result.HostFence.(codeClaimFence)
+		var wrongOwner bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM code_execution_state WHERE execution_id=? AND (claim_token IS NULL OR claim_token!=? OR execution_epoch!=? OR owner_run_token!=? OR claim_expires_at<=?))`, id, owner.token, owner.epoch, t.claim.(*claim).token, time.Now().UnixMicro()).Scan(&wrongOwner); err != nil {
+			return err
+		}
+		if wrongOwner {
+			return agent.ErrClaimLost
 		}
 		if reject {
 			if _, err := tx.ExecContext(ctx, `UPDATE tool_invocation SET status='running',wait_reason=NULL,updated_at=?,version=version+1 WHERE invocation_id=? AND run_id=? AND status IN ('queued','waiting')`, time.Now().UnixMicro(), id, t.claim.RunID()); err != nil {
@@ -248,7 +279,7 @@ func (t *tools) finish(ctx, outputCtx context.Context, id string, result tool.Re
 		if err != nil {
 			return err
 		}
-		if err = fence(ctx, tx, t.claim); err != nil {
+		if err = t.fence(ctx, tx); err != nil {
 			return err
 		}
 		if out != nil {
@@ -319,7 +350,7 @@ func (t *tools) load(ctx context.Context, tx *sql.Tx, id string) (tool.Invocatio
 func (t *tools) Prepare(ctx context.Context, id string) (tool.Invocation, error) {
 	var inv tool.Invocation
 	err := t.runs.write(ctx, func(tx *sql.Tx) error {
-		if err := fence(ctx, tx, t.claim); err != nil {
+		if err := t.fence(ctx, tx); err != nil {
 			return err
 		}
 		var p tool.Policy
@@ -394,7 +425,7 @@ func (t *tools) Prepare(ctx context.Context, id string) (tool.Invocation, error)
 		if p.Risk != "high" || inv.Attempts > 0 {
 			return nil
 		}
-		now := time.Now().UnixMicro()
+		now := t.runs.approvalTime().UnixMicro()
 		inserted, err := tx.ExecContext(ctx, `INSERT INTO approval(approval_id,invocation_id,risk_type,scope,frozen_arguments_hash,status,expires_at,created_at,version) SELECT ?,invocation_id,?,r.agent_id,request_hash,'pending',?,?,1 FROM tool_invocation i JOIN run r USING(run_id) WHERE invocation_id=? ON CONFLICT(invocation_id) DO NOTHING`, newID(), p.Risk, now+t.runs.approvalDuration().Microseconds(), now, id)
 		if err != nil {
 			return err
@@ -464,7 +495,7 @@ func (t *tools) Defer(ctx context.Context, id, reason string, wake time.Time) er
 		return agent.ErrConflict
 	}
 	return t.runs.write(ctx, func(tx *sql.Tx) error {
-		if err := fence(ctx, tx, t.claim); err != nil {
+		if err := t.fence(ctx, tx); err != nil {
 			return err
 		}
 		var at any
@@ -483,7 +514,7 @@ func (t *tools) Defer(ctx context.Context, id, reason string, wake time.Time) er
 }
 func (t *tools) Unknown(ctx context.Context, id string) error {
 	return t.runs.write(ctx, func(tx *sql.Tx) error {
-		if err := fence(ctx, tx, t.claim); err != nil {
+		if err := t.fence(ctx, tx); err != nil {
 			return err
 		}
 		res, err := tx.ExecContext(ctx, `UPDATE tool_invocation SET status='unknown',wait_reason=NULL,error_json=?,updated_at=?,version=version+1 WHERE invocation_id=? AND run_id=? AND status='running'`, tool.Failure("UNKNOWN_SIDE_EFFECT").ModelText(), time.Now().UnixMicro(), id, t.claim.RunID())

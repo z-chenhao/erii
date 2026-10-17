@@ -4,13 +4,19 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
 	"time"
 )
+
+var ErrEventCommit = errors.New("JavaScript event commit rejected")
 
 var ErrProtocol = errors.New("JavaScript runtime protocol failure")
 
@@ -91,13 +97,20 @@ func (s *Sidecar) Start(ctx context.Context, req ExecutionRequest, sink Executio
 		return Outcome{}, ErrProtocol
 	}
 	var identity struct {
-		Protocol string `json:"protocolVersion"`
-		Runtime  string `json:"runtimeVersion"`
-		Prelude  string `json:"preludeVersion"`
+		Protocol    string `json:"protocolVersion"`
+		Runtime     string `json:"runtimeVersion"`
+		Prelude     string `json:"preludeVersion"`
+		RuntimeHash string `json:"runtimeHash"`
+		PreludeHash string `json:"preludeHash"`
 	}
 	if json.Unmarshal(msg.Result, &identity) != nil || identity.Protocol != ProtocolVersion || identity.Runtime != RuntimeVersion || identity.Prelude != PreludeVersion {
 		return Outcome{}, ErrProtocol
 	}
+	if (req.RuntimeHash != "" && req.RuntimeHash != identity.RuntimeHash) || (req.PreludeHash != "" && req.PreludeHash != identity.PreludeHash) {
+		return Outcome{}, ErrProtocol
+	}
+	req.RuntimeHash = identity.RuntimeHash
+	req.PreludeHash = identity.PreludeHash
 	if p.send(map[string]any{"jsonrpc": "2.0", "id": "start", "method": "execution.start", "params": req}) != nil {
 		return Outcome{}, ErrProtocol
 	}
@@ -135,7 +148,7 @@ func (s *Sidecar) Start(ctx context.Context, req ExecutionRequest, sink Executio
 			return Outcome{}, ErrProtocol
 		}
 		var event Message
-		if json.Unmarshal(msg.Params, &event) != nil || event.ProtocolVersion != ProtocolVersion || event.RuntimeID != RuntimeVersion || event.ExecutionID != req.ExecutionID || event.ParentInvocationID != req.ParentInvocationID || event.RunID != req.RunID || event.Sequence < 1 {
+		if json.Unmarshal(msg.Params, &event) != nil || event.ClaimToken != req.ClaimToken || event.ExecutionEpoch != req.ExecutionEpoch || event.ProtocolVersion != ProtocolVersion || event.RuntimeID != RuntimeVersion || event.ExecutionID != req.ExecutionID || event.ParentInvocationID != req.ParentInvocationID || event.RunID != req.RunID || event.Sequence < 1 {
 			return Outcome{}, ErrProtocol
 		}
 		value := string(msg.Params)
@@ -178,7 +191,7 @@ func (s *Sidecar) Start(ctx context.Context, req ExecutionRequest, sink Executio
 		case "execution.event", "host.discover", "host.store_get", "host.store_put":
 			err := respond(msg, event)
 			if msg.Method == "execution.event" && err != nil {
-				return Outcome{}, ErrProtocol
+				return Outcome{}, ErrEventCommit
 			}
 		default:
 			return Outcome{}, ErrProtocol
@@ -199,3 +212,26 @@ func (s *Sidecar) Cancel(ctx context.Context, id, reason string) error {
 	return p.send(map[string]any{"jsonrpc": "2.0", "id": "cancel", "method": "execution.cancel", "params": map[string]string{"executionId": id, "reason": reason}})
 }
 func (s *Sidecar) Dispose(ctx context.Context, id string) error { return s.Cancel(ctx, id, "dispose") }
+
+// Fingerprint covers executable sources and the pinned engine bytes. A version
+// string alone cannot prove an installed Runtime is the one a Run froze.
+func (s *Sidecar) Fingerprint() (string, string, error) {
+	root := filepath.Dir(s.Script)
+	hashFiles := func(paths []string) (string, error) {
+		h := sha256.New()
+		for _, path := range paths {
+			b, err := os.ReadFile(filepath.Join(root, path))
+			if err != nil {
+				return "", ErrProtocol
+			}
+			_, _ = h.Write(b)
+		}
+		return hex.EncodeToString(h.Sum(nil)), nil
+	}
+	runtime, err := hashFiles([]string{"sidecar.mjs", "worker.mjs", "vendor/vm.mjs", "../package-lock.json", "../node_modules/quickjs-wasi/quickjs.wasm"})
+	if err != nil {
+		return "", "", err
+	}
+	prelude, err := hashFiles([]string{"prelude.mjs", "vendor/prelude.mjs"})
+	return runtime, prelude, err
+}

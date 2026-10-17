@@ -212,10 +212,10 @@ export async function startVm(options) {
     };
     try {
         // Called from the prelude with primitives only.
-        const bridge = vm.newFunction("bridge", (kind, a, b, c) => {
+        const bridge = vm.newFunction("bridge", (kind, a, b, c, position) => {
             switch (kind.toString()) {
                 case "sync": {
-                    const value = options.sync(a.toString(), b.toString());
+                    const value = options.sync(a.toString(), b.toString(), c?.toString());
                     return vm.newString(value);
                 }
                 case "call":
@@ -224,6 +224,7 @@ export async function startVm(options) {
                     post({
                         type: "call",
                         id: a.toNumber(),
+                        position: position?.toString(),
                         target: kind.toString() === "call" ? "tool" : "global",
                         name: b.toString(),
                         args: c === undefined || c.isUndefined ? undefined : c.toString(),

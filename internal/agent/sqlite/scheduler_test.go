@@ -508,7 +508,7 @@ func TestSchedulerMigrationV13PreservesFrozenTreeAndRollsBack(t *testing.T) {
 				}
 				return
 			}
-			if err != nil || version != 16 || columns != 1 {
+			if err != nil || version != 17 || columns != 1 {
 				t.Fatal(err, version, columns)
 			}
 			var identical, turns, calls, ticket int

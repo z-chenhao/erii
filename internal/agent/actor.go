@@ -134,6 +134,7 @@ func (a Actor) execute(ctx context.Context, id string, claim RunClaim) error {
 	work, stop := context.WithCancel(ctx)
 	execution, cancelExecution := context.WithCancel(context.WithoutCancel(ctx))
 	defer cancelExecution()
+	execution = tool.WithShutdownSignal(execution, ctx.Done())
 	done := make(chan struct{})
 	var heartbeat sync.WaitGroup
 	heartbeat.Add(1)

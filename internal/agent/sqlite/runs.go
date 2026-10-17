@@ -25,17 +25,18 @@ import (
 )
 
 type Runs struct {
-	javascript  codemode.JavaScriptRuntime
-	host        *Store
-	history     conversation.Store
-	registry    *tool.Registry
-	recentAge   time.Duration
-	recentLimit int
-	limits      ToolLimits
-	approvalTTL time.Duration
-	childLimits agent.ChildLimits
-	spend       agent.SpendPolicy
-	scheduler   agent.SchedulerLimits
+	javascript    codemode.JavaScriptRuntime
+	host          *Store
+	history       conversation.Store
+	registry      *tool.Registry
+	recentAge     time.Duration
+	recentLimit   int
+	limits        ToolLimits
+	approvalTTL   time.Duration
+	approvalClock func() time.Time
+	childLimits   agent.ChildLimits
+	spend         agent.SpendPolicy
+	scheduler     agent.SchedulerLimits
 }
 
 func (s *Store) Runs(history conversation.Store, registry *tool.Registry) *Runs {
@@ -180,6 +181,9 @@ func (r *Runs) Submit(ctx context.Context, key string, parts []conversation.Cont
 }
 
 func (r *Runs) Next(ctx context.Context) (string, error) {
+	if err := r.recoverCode(ctx); err != nil {
+		return "", err
+	}
 	if err := r.recoverApprovals(ctx); err != nil {
 		return "", err
 	}
@@ -256,6 +260,9 @@ func (r *Runs) Claim(ctx context.Context, id string) (agent.RunClaim, error) {
 func (r *Runs) Renew(ctx context.Context, c agent.RunClaim) error {
 	return r.write(ctx, func(tx *sql.Tx) error {
 		if err := ownership(ctx, tx, c); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE code_execution_state SET claim_expires_at=?,version=version+1 WHERE owner_run_token=? AND claim_token IS NOT NULL AND desired_state='running'`, time.Now().Add(leaseDuration).UnixMicro(), c.(*claim).token); err != nil {
 			return err
 		}
 		_, err := tx.ExecContext(ctx, `UPDATE run_claim SET expires_at=?,version=version+1 WHERE run_id=?`, time.Now().Add(leaseDuration).UnixMicro(), c.RunID())

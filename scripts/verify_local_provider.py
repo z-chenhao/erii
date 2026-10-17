@@ -202,7 +202,7 @@ def verify(binary, script):
             report["checks"].append("partial stream is not completion")
 
             with closing(sqlite3.connect(root / "data/state.db")) as db:
-                require(db.execute("pragma user_version").fetchone()[0] == 16, "schema")
+                require(db.execute("pragma user_version").fetchone()[0] == 17, "schema")
                 rows = db.execute("SELECT snapshot_id,run_id,input_tokens,output_tokens,latency_ms,error_code,snapshot_json FROM provider_usage").fetchall()
                 require(rows and any(r[2:4] == (7, 8) for r in rows), "usage not recorded")
                 require(any(r[5] == "GENERATION_CANCELLED" and r[2] is None for r in rows), "unknown cancellation usage fabricated")

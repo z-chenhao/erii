@@ -42,6 +42,9 @@ func run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer
 	if len(args) == 2 && args[0] == "-test-mcp-server" {
 		return mcpfake.Serve(in, out, args[1])
 	}
+	if len(args) == 3 && args[0] == "-test-provider-bridge" {
+		return fake.ServeRecorded(in, out, args[1], args[2])
+	}
 	if len(args) == 2 && args[0] == "-test-provider-bridge" {
 		return fake.Serve(in, out, args[1])
 	}
@@ -52,6 +55,7 @@ func run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer
 	testBridge := flags.String("test-bridge", "", "explicit deterministic test Bridge fixture; never a real provider")
 	testDelivery := flags.String("test-delivery", "", "explicit test Bridge only: retry-once, unavailable, ambiguous, unknown")
 	testMainHold := flags.String("test-main-hold", "", "explicit test Bridge only: hold at a Main durability boundary until shutdown")
+	testMainRelease := flags.String("test-main-release", "", "explicit test Bridge only: release a held boundary when this file exists")
 	flags.Usage = func() {
 		fmt.Fprintln(errOut, "Usage: personal-agent [-config path] [-test-bridge fixture] [tui|status|relay|delivery list|delivery work|chat send [REQUEST_KEY]|chat send-parts [REQUEST_KEY]|artifact save NAME MEDIA_TYPE|artifact open REF|artifact describe REF|artifact delete REF VERSION|artifact cleanup [apply]|chat work|chat history|spend status|approval list|approval approve ID HASH|approval deny ID HASH|approval reconcile|model add [URL MODEL_ID [AUTH_ID]]|model discover URL [AUTH_ID]|model list|model catalog [PROFILE_ID]|model login [ENV_NAME]|model test ID|model select ID PROFILE_VERSION CONFIG_VERSION|model cancel]\nWithout a command, open the TUI on a terminal; with redirected stdin, print diagnostics and wait for SIGINT/SIGTERM.\nrelay runs the internal event publisher until stopped.\nchat send reads text on stdin and durably accepts it; chat work drains/reclaims Main work in the foreground; chat history reads semantic messages.\nmodel add reads metadata JSON; test proves capabilities; select atomically activates a tested version. model cancel leaves setup unchanged. ChatGPT: model login-chatgpt [ACCOUNT_ID], accounts, account-catalog ACCOUNT_ID, account-add ACCOUNT_ID MODEL_ID, refresh ACCOUNT_ID, logout ACCOUNT_ID. Login emits a private browser URL; open it to continue with ChatGPT.")
 		flags.PrintDefaults()
@@ -154,7 +158,22 @@ func run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer
 				_ = json.NewEncoder(out).Encode(struct {
 					Boundary string `json:"boundary"`
 				}{name})
-				<-ctx.Done()
+				if *testMainRelease == "" {
+					<-ctx.Done()
+				} else {
+					ticker := time.NewTicker(10 * time.Millisecond)
+					defer ticker.Stop()
+					for {
+						if _, err := os.Stat(*testMainRelease); err == nil {
+							break
+						}
+						select {
+						case <-ctx.Done():
+							return
+						case <-ticker.C:
+						}
+					}
+				}
 			}
 		})
 	}
@@ -301,6 +320,9 @@ func run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer
 			return json.NewEncoder(out).Encode(receipt)
 		case "work":
 			workErr := application.Actor(nil).Drain(ctx)
+			if ctx.Err() != nil && workErr == ctx.Err() {
+				return nil
+			}
 			deliveryErr := application.Deliver(ctx)
 			if err := errors.Join(workErr, deliveryErr); err != nil {
 				return err

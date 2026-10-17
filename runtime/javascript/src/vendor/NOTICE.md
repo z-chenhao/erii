@@ -9,7 +9,7 @@ sha512-2G9tmbsPhgzwfz7cmzJpbLSLqOx3eu22Gbzm+Wc3HqeZMjLQS4F3KfAabozVhv7uEjq3k2O1d
 applies checked adaptations for synchronous durable Store, canonical metadata,
 CUA/Agent facades, explicit-only output, and prohibited time/random globals.
 `vm.mjs` changes the prelude import and adds a primitive-only synchronous Host
-callback. The Node worker owns CPU interruption, cancellation and disposal.
+callback plus a primitive source-stack argument captured by the trusted Prelude. The Node worker owns CPU interruption, cancellation and disposal.
 There is no alternate JavaScript interpreter or model execution path.
 
 The MIT notice is retained in LICENSE. QuickJS-WASI 3.6.2 is separately pinned

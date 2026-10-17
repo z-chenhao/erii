@@ -474,7 +474,7 @@ func TestSpendMigrationFrom14AndRollback(t *testing.T) {
 			if err == nil || version != 14 || tables != 0 {
 				t.Fatal("partial migration", version, tables, err)
 			}
-		} else if err != nil || version != 16 || tables != 3 {
+		} else if err != nil || version != 17 || tables != 3 {
 			t.Fatal(version, tables, err)
 		}
 		if !broken {

@@ -38,7 +38,7 @@ type nestedTools struct {
 func (t nestedTools) Accept(ctx context.Context, exchange string, calls []llm.ToolCall, specs []tool.Spec) ([]tool.Invocation, error) {
 	return t.tools.accept(ctx, exchange, calls, specs, t.parent)
 }
-func (t *tools) executeCode(ctx context.Context, inv tool.Invocation) (tool.Result, error) {
+func (t *tools) executeCode(ctx context.Context, inv tool.Invocation) (result tool.Result, executionErr error) {
 	if t.runs.javascript == nil {
 		return tool.Failure("PROVIDER_UNAVAILABLE"), nil
 	}
@@ -48,131 +48,167 @@ func (t *tools) executeCode(ctx context.Context, inv tool.Invocation) (tool.Resu
 	if json.Unmarshal([]byte(inv.Call.Arguments), &args) != nil {
 		return tool.Failure("INVALID_ARGUMENT"), nil
 	}
-	b := &codeBridge{t: t, attempt: newID()}
-	req := codemode.ExecutionRequest{ProtocolVersion: codemode.ProtocolVersion, RuntimeVersion: codemode.RuntimeVersion, PreludeVersion: codemode.PreludeVersion, ExecutionID: inv.ID, ParentInvocationID: inv.ID, RunID: t.claim.RunID(), Source: args.Source, SourceHash: digest(args.Source), Limits: codemode.DefaultLimits()}
-	err := t.runs.write(ctx, func(tx *sql.Tx) error {
-		if err := fence(ctx, tx, t.claim); err != nil {
-			return err
+	b := &codeBridge{t: t}
+	b.req = codemode.ExecutionRequest{ProtocolVersion: codemode.ProtocolVersion, RuntimeVersion: codemode.RuntimeVersion, PreludeVersion: codemode.PreludeVersion, ExecutionID: inv.ID, ParentInvocationID: inv.ID, RunID: t.claim.RunID(), Source: args.Source, SourceHash: digest(args.Source), Limits: codemode.DefaultLimits()}
+	var fingerprintErr error
+	b.req.RuntimeHash, b.req.PreludeHash, fingerprintErr = t.runs.javascript.Fingerprint()
+	if fingerprintErr != nil {
+		return tool.Result{}, agent.ErrStorage
+	}
+	defer func() {
+		if b.req.ClaimToken != "" && b.req.ExecutionEpoch > 0 {
+			result.HostFence = codeClaimFence{b.req.ClaimToken, b.req.ExecutionEpoch}
 		}
-		var raw string
-		if err := tx.QueryRowContext(ctx, `SELECT r.kind,c.tools_json,i.provider_exchange_id FROM run r JOIN capability_snapshot c ON c.snapshot_id=r.capability_snapshot_id JOIN tool_invocation i USING(run_id) WHERE i.invocation_id=? AND i.status='running'`, inv.ID).Scan(&req.Kind, &raw, &b.exchange); err != nil {
-			return err
+	}()
+	if err := b.claim(ctx, inv); err != nil {
+		if errors.Is(err, tool.ErrReplay) {
+			return tool.Failure("NON_DETERMINISTIC_REPLAY"), nil
 		}
-		if json.Unmarshal([]byte(raw), &req.Tools) != nil {
-			return agent.ErrStorage
+		return tool.Result{}, err
+	}
+	defer func() {
+		if executionErr != nil {
+			if err := b.abandon(); err != nil {
+				executionErr = errors.Join(executionErr, err)
+			}
 		}
-		_, err := tx.ExecContext(ctx, `INSERT INTO code_execution(execution_id,source_hash,runtime_version,prelude_version,created_at) VALUES(?,?,?,?,?) ON CONFLICT DO NOTHING`, inv.ID, req.SourceHash, req.RuntimeVersion, req.PreludeVersion, time.Now().UnixMicro())
-		if err != nil {
-			return err
-		}
-		var hash, runtime, prelude string
-		if err = tx.QueryRowContext(ctx, `SELECT source_hash,runtime_version,prelude_version FROM code_execution WHERE execution_id=?`, inv.ID).Scan(&hash, &runtime, &prelude); err != nil {
-			return err
-		}
-		if hash != req.SourceHash || runtime != req.RuntimeVersion || prelude != req.PreludeVersion {
-			return tool.ErrReplay
-		}
-		return nil
-	})
+	}()
+	var err error
+	b.registry, err = t.runs.registry.Select(b.req.Tools)
 	if err != nil {
 		return tool.Result{}, err
 	}
-	// Never recursively expose the execution tool as an inner Host capability.
 	inner := []tool.Spec{}
-	for _, spec := range req.Tools {
-		if spec.Name != codemode.ToolName {
-			inner = append(inner, spec)
+	for _, s := range b.req.Tools {
+		if s.Name != codemode.ToolName {
+			inner = append(inner, s)
 		}
 	}
-	b.registry, err = t.runs.registry.Select(req.Tools)
-	if err != nil {
-		return tool.Result{}, err
-	}
-	req.Tools = inner
-	b.req = req
-	var outcome codemode.Outcome
-	var saved string
-	err = t.runs.host.db.QueryRowContext(ctx, `SELECT outcome_json FROM code_outcome WHERE execution_id=?`, inv.ID).Scan(&saved)
-	if err == nil {
-		if json.Unmarshal([]byte(saved), &outcome) != nil {
+	b.req.Tools = inner
+	crashes := 0
+	for {
+		observed, err := b.wake(ctx)
+		if err != nil {
+			return tool.Result{}, err
+		}
+		var outcome codemode.Outcome
+		var saved string
+		err = t.runs.host.db.QueryRowContext(ctx, `SELECT outcome_json FROM code_outcome WHERE execution_id=?`, inv.ID).Scan(&saved)
+		if err == nil {
+			if json.Unmarshal([]byte(saved), &outcome) != nil {
+				return tool.Result{}, agent.ErrStorage
+			}
+		} else if err == sql.ErrNoRows {
+			b.attempt = newID()
+			err = t.runs.write(ctx, func(tx *sql.Tx) error {
+				if err := b.fence(ctx, tx); err != nil {
+					return err
+				}
+				_, err := tx.ExecContext(ctx, `UPDATE code_execution_state SET replay_starts=replay_starts+1,version=version+1 WHERE execution_id=?`, inv.ID)
+				return err
+			})
+			if err != nil {
+				return tool.Result{}, err
+			}
+			vmCtx, stopVM := context.WithCancel(ctx)
+			joined := make(chan struct{})
+			go func() {
+				select {
+				case <-tool.ShutdownSignal(ctx):
+					stopVM()
+				case <-joined:
+				}
+			}()
+			outcome, err = t.runs.javascript.Start(vmCtx, b.req, b)
+			close(joined)
+			stopVM()
+			select {
+			case <-tool.ShutdownSignal(ctx):
+				return tool.Result{}, context.Canceled
+			default:
+			}
+		}
+		if err != nil {
+			if errors.Is(err, codemode.ErrEventCommit) {
+				return tool.Failure("PROVIDER_UNAVAILABLE"), nil
+			}
+			if ctx.Err() != nil {
+				return tool.Result{}, ctx.Err()
+			}
+			// Transport death is infrastructure. Rebuild the VM from immutable source;
+			// never turn a lost peer into a new logical nested call.
+			crashes++
+			if crashes <= 3 {
+				continue
+			}
 			return tool.Result{}, agent.ErrStorage
 		}
-	} else if err == sql.ErrNoRows {
-		outcome, err = t.runs.javascript.Start(ctx, req, b)
-	}
-	if err != nil {
-		if ctx.Err() != nil {
-			return tool.Result{}, ctx.Err()
+		if outcome.Kind == "completed" || outcome.Kind == "failed" {
+			raw, _ := encoded(outcome)
+			err = t.runs.write(ctx, func(tx *sql.Tx) error {
+				if err := b.fence(ctx, tx); err != nil {
+					return err
+				}
+				_, err := tx.ExecContext(ctx, `INSERT INTO code_outcome VALUES(?,?,?) ON CONFLICT DO NOTHING`, inv.ID, raw, time.Now().UnixMicro())
+				return err
+			})
+			if err != nil {
+				return tool.Result{}, err
+			}
+		}
+		// All nonterminal Host calls are admitted before VM disposal. Execute them
+		// through the ordinary pipeline with no retained JavaScript heap.
+		err = b.drain(ctx)
+		if err != nil && !errors.Is(err, tool.ErrSuspended) {
+			return tool.Result{}, err
+		}
+		if errors.Is(err, tool.ErrSuspended) {
+			t.runs.host.boundary("before_code_release")
+			idle, e := b.release(ctx, observed)
+			if e != nil {
+				return tool.Result{}, e
+			}
+			if !idle {
+				continue
+			}
+			return tool.Result{}, tool.ErrSuspended
+		}
+		switch outcome.Kind {
+		case "suspended":
+			continue
+		case "cancelled":
+			return tool.Failure("CANCELLED"), nil
+		case "failed":
+			if outcome.Error != nil {
+				return tool.Normalize(tool.Result{Error: outcome.Error}), nil
+			}
+			return tool.Failure("INVALID_ARGUMENT"), nil
+		case "completed":
+			value, _ := json.Marshal(outcome.Output)
+			return tool.Result{Text: string(value)}, nil
 		}
 		return tool.Failure("PROVIDER_UNAVAILABLE"), nil
 	}
-	if (outcome.Kind == "completed" || outcome.Kind == "failed") && len(outcome.PendingCallIDs) > 0 {
-		raw, _ := encoded(outcome)
-		if err = t.runs.write(ctx, func(tx *sql.Tx) error {
-			if err := fence(ctx, tx, t.claim); err != nil {
-				return err
-			}
-			_, err := tx.ExecContext(ctx, `INSERT INTO code_outcome VALUES(?,?,?) ON CONFLICT DO NOTHING`, inv.ID, raw, time.Now().UnixMicro())
-			return err
-		}); err != nil {
-			return tool.Result{}, err
-		}
-		if err = b.drain(ctx, outcome.PendingCallIDs); err != nil {
-			if errors.Is(err, tool.ErrSuspended) {
-				return t.suspendCode(ctx, inv.ID)
-			}
-			if errors.Is(err, tool.ErrReplay) {
-				return tool.Failure("NON_DETERMINISTIC_REPLAY"), nil
-			}
-			return tool.Result{}, err
-		}
-	}
-	switch outcome.Kind {
-	case "suspended":
-		return t.suspendCode(ctx, inv.ID)
-	case "cancelled":
-		return tool.Failure("CANCELLED"), nil
-	case "failed":
-		if outcome.Error != nil {
-			return tool.Normalize(tool.Result{Error: outcome.Error}), nil
-		}
-		return tool.Failure("INVALID_ARGUMENT"), nil
-	case "completed":
-		value, _ := json.Marshal(outcome.Output)
-		return tool.Result{Text: string(value)}, nil
-	}
-	return tool.Failure("PROVIDER_UNAVAILABLE"), nil
 }
 
-// suspendCode releases the VM and Parent lease; the ordinary nested waiters
-// supply approval/Child/resource wakes through the existing Run scheduler.
-func (t *tools) suspendCode(ctx context.Context, id string) (tool.Result, error) {
-	err := t.runs.write(ctx, func(tx *sql.Tx) error {
-		if err := fence(ctx, tx, t.claim); err != nil {
-			return err
-		}
-		_, err := tx.ExecContext(ctx, `UPDATE tool_invocation SET status='waiting',wait_reason='external_event',updated_at=?,version=version+1 WHERE invocation_id=? AND status='running'`, time.Now().UnixMicro(), id)
-		return err
-	})
-	if err != nil {
-		return tool.Result{}, err
-	}
-	return tool.Result{}, tool.ErrSuspended
-}
-func (b *codeBridge) drain(ctx context.Context, pending []string) error {
+func (b *codeBridge) drain(ctx context.Context) error {
 	calls := []llm.ToolCall{}
-	for _, id := range pending {
+	rows, err := b.t.runs.host.db.QueryContext(ctx, `SELECT i.provider_call_id,i.tool_name,i.arguments_json FROM code_call c JOIN tool_invocation i USING(invocation_id) WHERE c.execution_id=? AND i.status NOT IN ('succeeded','failed','cancelled','unknown') ORDER BY i.created_at,c.call_id`, b.req.ExecutionID)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
 		var call llm.ToolCall
-		err := b.t.runs.host.db.QueryRowContext(ctx, `SELECT i.provider_call_id,i.tool_name,i.arguments_json FROM code_call c JOIN tool_invocation i USING(invocation_id) WHERE c.execution_id=? AND c.call_id=?`, b.req.ExecutionID, b.req.ExecutionID+"/"+id).Scan(&call.ID, &call.Name, &call.Arguments)
-		// Start joins outstanding Host callbacks before returning. Absence here
-		// proves this issued call was never accepted and had no external effect.
-		if err == sql.ErrNoRows {
-			continue
-		}
-		if err != nil {
+		if err = rows.Scan(&call.ID, &call.Name, &call.Arguments); err != nil {
+			rows.Close()
 			return err
 		}
 		calls = append(calls, call)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
 	}
 	suspended := false
 	for start := 0; start < len(calls); start += 64 {
@@ -180,7 +216,7 @@ func (b *codeBridge) drain(ctx context.Context, pending []string) error {
 		if end > len(calls) {
 			end = len(calls)
 		}
-		_, err := (tool.Executor{Registry: b.registry, Store: nestedTools{b.t, b.req.ExecutionID}, Concurrency: 4}).Execute(computer.WithExecution(ctx, b.req.ExecutionID), b.exchange, calls[start:end])
+		_, err := (tool.Executor{Registry: b.registry, Store: nestedTools{b.t.forCode(b), b.req.ExecutionID}, Concurrency: 4}).Execute(computer.WithExecution(ctx, b.req.ExecutionID), b.exchange, calls[start:end])
 		if errors.Is(err, tool.ErrSuspended) {
 			suspended = true
 		} else if err != nil {
@@ -195,12 +231,12 @@ func (b *codeBridge) drain(ctx context.Context, pending []string) error {
 
 func (b *codeBridge) Handle(ctx context.Context, method string, m codemode.Message) (codemode.Reply, error) {
 	empty := codemode.Reply{}
-	if m.ExecutionID != b.req.ExecutionID || m.ParentInvocationID != b.req.ParentInvocationID || m.RunID != b.req.RunID {
+	if m.ClaimToken != b.req.ClaimToken || m.ExecutionEpoch != b.req.ExecutionEpoch || m.ExecutionID != b.req.ExecutionID || m.ParentInvocationID != b.req.ParentInvocationID || m.RunID != b.req.RunID {
 		return empty, agent.ErrConflict
 	}
 	// Persist every incoming message, including frozen Host parameters, before ack.
 	err := b.t.runs.write(ctx, func(tx *sql.Tx) error {
-		if err := fence(ctx, tx, b.t.claim); err != nil {
+		if err := b.fence(ctx, tx); err != nil {
 			return err
 		}
 		value, _ := encoded(m)
@@ -219,6 +255,12 @@ func (b *codeBridge) Handle(ctx context.Context, method string, m codemode.Messa
 			return err
 		}
 		if method == "execution.event" {
+			if (m.Kind == "execution_completed" || m.Kind == "execution_failed") && m.Outcome != nil {
+				outcome, _ := encoded(m.Outcome)
+				if _, err := tx.ExecContext(ctx, `INSERT INTO code_outcome VALUES(?,?,?) ON CONFLICT DO NOTHING`, m.ExecutionID, outcome, time.Now().UnixMicro()); err != nil {
+					return err
+				}
+			}
 			return runEvent(ctx, tx, b.t.claim.RunID(), "codemode."+m.Kind, 1)
 		}
 		return nil
@@ -228,10 +270,21 @@ func (b *codeBridge) Handle(ctx context.Context, method string, m codemode.Messa
 	}
 	switch method {
 	case "execution.event":
+		// Opt-in exact recovery checkpoint; no production query or hidden fixture.
+		if m.Kind == "execution_suspended" && b.t.runs.host.MainBoundary != nil {
+			var completed, active int
+			err := b.t.runs.host.db.QueryRowContext(ctx, `SELECT coalesce(sum(child.status='completed'),0),coalesce(sum(child.status IN ('queued','running','waiting')),0) FROM code_call c JOIN agent_invocation a USING(invocation_id) JOIN run child ON child.run_id=a.child_run_id WHERE c.execution_id=?`, b.req.ExecutionID).Scan(&completed, &active)
+			if err != nil {
+				return empty, err
+			}
+			if completed == 37 && active == 8 {
+				b.t.runs.host.boundary("code_37_completed_8_active")
+			}
+		}
 		return empty, nil
 	case "host.invoke":
 		n, err := strconv.Atoi(m.CallID)
-		if err != nil || n < 1 || n > 10000 {
+		if err != nil || n < 1 || n > 10000 || len(m.CallKey) != 64 {
 			return denied("PERMISSION_DENIED"), nil
 		}
 		if m.ToolName == codemode.ToolName {
@@ -249,20 +302,34 @@ func (b *codeBridge) Handle(ctx context.Context, method string, m codemode.Messa
 		if err != nil {
 			return denied("INVALID_ARGUMENT"), nil
 		}
-		call := llm.ToolCall{ID: b.req.ExecutionID + "/" + m.CallID, Name: m.ToolName, Arguments: string(arguments)}
-		results, err := (tool.Executor{Registry: b.registry, Store: nestedTools{b.t, b.req.ExecutionID}, Concurrency: 1}).Execute(computer.WithExecution(ctx, b.req.ExecutionID), b.exchange, []llm.ToolCall{call})
-		if errors.Is(err, tool.ErrSuspended) {
-			return codemode.Reply{Suspended: true}, nil
-		}
+		call := llm.ToolCall{ID: b.req.ExecutionID + "/" + m.CallKey, Name: m.ToolName, Arguments: string(arguments)}
+		invocations, err := (nestedTools{b.t.forCode(b), b.req.ExecutionID}).Accept(ctx, b.exchange, []llm.ToolCall{call}, b.registry.Describe())
 		if errors.Is(err, tool.ErrReplay) {
 			return denied("NON_DETERMINISTIC_REPLAY"), nil
 		}
 		if err != nil {
 			return empty, err
 		}
-		r := results[0]
+		accepted := invocations[0]
+		if accepted.Status != "succeeded" && accepted.Status != "failed" && accepted.Status != "cancelled" && accepted.Status != "unknown" {
+			return codemode.Reply{Suspended: true}, nil
+		}
+		err = b.t.runs.write(ctx, func(tx *sql.Tx) error {
+			if err := b.fence(ctx, tx); err != nil {
+				return err
+			}
+			_, err := tx.ExecContext(ctx, `UPDATE code_execution_state SET replay_hits=replay_hits+1,version=version+1 WHERE execution_id=?`, b.req.ExecutionID)
+			return err
+		})
+		if err != nil {
+			return empty, err
+		}
+		r := accepted.Result
+		if accepted.Status == "unknown" {
+			r = tool.Failure("UNKNOWN_SIDE_EFFECT")
+		}
 		if r.Error != nil {
-			return codemode.Reply{Error: r.Error}, nil
+			return b.deliver(ctx, call.ID, codemode.Reply{Error: r.Error})
 		}
 		// Providers normalize their business result to JSON text at ToolExecutor.
 		var value any
@@ -272,26 +339,44 @@ func (b *codeBridge) Handle(ctx context.Context, method string, m codemode.Messa
 		if len(r.ArtifactRefs) > 0 {
 			value = map[string]any{"text": r.Text, "artifactRefs": r.ArtifactRefs}
 		}
-		return codemode.Reply{Value: value}, nil
+		return b.deliver(ctx, call.ID, codemode.Reply{Value: value})
 	case "host.store_get", "host.store_put":
-		return b.store(ctx, method, m.Arguments)
+		return b.store(ctx, method, m.CallKey, m.Arguments)
 	case "host.discover":
 		return b.discover(m), nil
 	}
 	return denied("PERMISSION_DENIED"), nil
 }
 func denied(code string) codemode.Reply { return codemode.Reply{Error: tool.Failure(code).Error} }
-func (b *codeBridge) store(ctx context.Context, method string, raw json.RawMessage) (codemode.Reply, error) {
+func (b *codeBridge) store(ctx context.Context, method, callKey string, raw json.RawMessage) (codemode.Reply, error) {
 	var args struct {
 		Key   string          `json:"key"`
 		Value json.RawMessage `json:"value"`
 	}
-	if json.Unmarshal(raw, &args) != nil || len(args.Key) == 0 || len(args.Key) > 256 {
+	if len(callKey) != 64 || json.Unmarshal(raw, &args) != nil || len(args.Key) == 0 || len(args.Key) > 256 {
 		return denied("INVALID_ARGUMENT"), nil
 	}
 	reply := codemode.Reply{}
 	err := b.t.runs.write(ctx, func(tx *sql.Tx) error {
-		if err := fence(ctx, tx, b.t.claim); err != nil {
+		if err := b.fence(ctx, tx); err != nil {
+			return err
+		}
+		requestHash := digest(method + ":" + string(raw))
+		var oldHash, oldReply string
+		err := tx.QueryRowContext(ctx, `SELECT request_hash,reply_json FROM code_store_call WHERE execution_id=? AND call_key=?`, b.req.ExecutionID, callKey).Scan(&oldHash, &oldReply)
+		if err == nil {
+			if oldHash != requestHash {
+				reply = denied("NON_DETERMINISTIC_REPLAY")
+				return nil
+			}
+			return json.Unmarshal([]byte(oldReply), &reply)
+		}
+		if err != sql.ErrNoRows {
+			return err
+		}
+		save := func() error {
+			value, _ := encoded(reply)
+			_, err := tx.ExecContext(ctx, `INSERT INTO code_store_call VALUES(?,?,?,?)`, b.req.ExecutionID, callKey, requestHash, value)
 			return err
 		}
 		if method == "host.store_put" {
@@ -307,19 +392,25 @@ func (b *codeBridge) store(ctx context.Context, method string, raw json.RawMessa
 				reply = denied("RESOURCE_LIMIT")
 				return nil
 			}
-			_, err := tx.ExecContext(ctx, `INSERT INTO code_store VALUES(?,?,?,1) ON CONFLICT(execution_id,key) DO UPDATE SET value_json=excluded.value_json,version=code_store.version+1`, b.req.ExecutionID, args.Key, string(args.Value))
-			return err
+			_, err := tx.ExecContext(ctx, `INSERT INTO code_store(execution_id,key,value_json,version,value_hash,updated_at) VALUES(?,?,?,1,?,?) ON CONFLICT(execution_id,key) DO UPDATE SET value_json=excluded.value_json,value_hash=excluded.value_hash,updated_at=excluded.updated_at,version=code_store.version+1`, b.req.ExecutionID, args.Key, string(args.Value), digest(string(args.Value)), time.Now().UnixMicro())
+			if err != nil {
+				return err
+			}
+			return save()
 		}
-		var value string
-		err := tx.QueryRowContext(ctx, `SELECT value_json FROM code_store WHERE execution_id=? AND key=?`, b.req.ExecutionID, args.Key).Scan(&value)
+		var value, hash string
+		err = tx.QueryRowContext(ctx, `SELECT value_json,value_hash FROM code_store WHERE execution_id=? AND key=?`, b.req.ExecutionID, args.Key).Scan(&value, &hash)
 		if err == sql.ErrNoRows {
-			return nil
+			return save()
 		}
 		if err != nil {
 			return err
 		}
+		if hash != digest(value) {
+			return tool.ErrReplay
+		}
 		reply.Value = json.RawMessage(value)
-		return nil
+		return save()
 	})
 	return reply, err
 }

@@ -405,7 +405,7 @@ func TestV3MigrationRollbackPreservesMetadata(t *testing.T) {
 	}
 	defer s.Close()
 	d, err := s.Diagnostics(ctx)
-	if err != nil || d.SchemaVersion != 16 || d.AgentID != "prior-agent" || d.ConfigVersion != 9 || d.Readiness != "setup_required" {
+	if err != nil || d.SchemaVersion != 17 || d.AgentID != "prior-agent" || d.ConfigVersion != 9 || d.Readiness != "setup_required" {
 		t.Fatal("v3 upgrade changed identity", d, err)
 	}
 	stored, err := s.Models().Profile(ctx, p.ProfileID)

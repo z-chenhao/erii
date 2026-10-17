@@ -22,11 +22,11 @@ async function fixture(t, host = async () => ({value: 'ok'})) {
  p.once('exit',()=>{for(const f of pending.values()) f({error:{message:'sidecar exited: '+stderr}})});
  t.after(async()=>{p.stdin.end();p.kill();await closed;lines.close()});
  const rpc=(method,params)=>new Promise(resolve=>{const id=++next;pending.set(id,resolve);send({id,method,params})});
- assert.ok((await rpc('runtime.initialize',{protocolVersion:'1',runtimeVersion:'erii-js-v1',preludeVersion:'erii-prelude-v1'})).result,stderr);
+ const identity=(await rpc('runtime.initialize',{protocolVersion:'1',runtimeVersion:'erii-js-v2',preludeVersion:'erii-prelude-v2'})).result;assert.ok(identity,stderr);
  let execution=0;
  async function run(source, tools=[], options={}){
-  const req={protocolVersion:'1',runtimeVersion:'erii-js-v1',preludeVersion:'erii-prelude-v1',executionId:'execution-'+ ++execution,
-   parentInvocationId:'invocation-'+execution,runId:'run',kind:'worker',source,sourceHash:createHash('sha256').update(source).digest('hex'),tools,
+  const req={protocolVersion:'1',runtimeVersion:'erii-js-v2',preludeVersion:'erii-prelude-v2',executionId:'execution-'+ ++execution,
+   runtimeHash:identity.runtimeHash,preludeHash:identity.preludeHash,claimToken:'claim',executionEpoch:1,providerCallId:'provider-call',parentInvocationId:'invocation-'+execution,runId:'run',kind:'worker',source,sourceHash:createHash('sha256').update(source).digest('hex'),tools,
    limits:{timeoutMs:3000,memoryBytes:32<<20,outputBytes:65536,pendingCalls:128,interruptBudget:10000},...options};
   return (await rpc('execution.start',req));
  }
@@ -132,4 +132,28 @@ test('suspension registers every issued parallel call before disposing the VM',a
  assert.equal(r.result?.kind,'suspended');
  assert.equal(calls.length,20);
  assert.equal(r.result?.pendingCallIds.length,20);
+});
+
+test('replay restores durable delivery order despite inverted transport replies',async t=>{
+ const f=await fixture(t,async m=>{
+  if(m.params.arguments.n===1){await new Promise(resolve=>setTimeout(resolve,20));return {value:'one',deliverySeq:1};}
+  return {value:'two',deliverySeq:2};
+ });
+ const r=await f.run('return await Promise.race([tools.builtin__text__echo({n:1}),tools.builtin__text__echo({n:2})]);',[echo]);
+ assert.deepEqual(r.result?.output,[{type:'return',value:'one'}]);
+});
+test('trusted source positions and dynamic ordinals produce stable scoped call keys',async t=>{
+ const keys=[];
+ const f=await fixture(t,async m=>{keys.push(m.params.callKey);return {value:1};});
+ const source='for(let i=0;i<2;i++) await tools.builtin__text__echo({});\nawait tools.builtin__text__echo({});';
+ assert.equal((await f.run(source,[echo])).result?.kind,'completed');
+ assert.equal((await f.run(source,[echo])).result?.kind,'completed');
+ assert.equal(new Set(keys.slice(0,3)).size,3);
+ assert.deepEqual(keys.slice(0,3),keys.slice(3));
+ assert.ok(keys.every(k=>/^[a-f0-9]{64}$/.test(k)));
+});
+test('replay drift fails the cell even if script catches Tool errors',async t=>{
+ const f=await fixture(t,async()=>({error:{code:'NON_DETERMINISTIC_REPLAY'}}));
+ const r=await f.run('try{await tools.builtin__text__echo({});}catch{} return "unsafe success";',[echo]);
+ assert.equal(r.result?.kind,'failed');assert.equal(r.result?.error.code,'NON_DETERMINISTIC_REPLAY');
 });

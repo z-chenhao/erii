@@ -17,7 +17,7 @@ from verify_main import require
 
 
 def run(binary):
-    report = {'version': 1, 'scope': 'ERII-19 QuickJS/ToolInvocation contract; ERII-20 full replay/fencing gates remain due',
+    report = {'version': 1, 'scope': 'QuickJS/ToolInvocation contract; full fixed-source kill/restart gates are verify_code_recovery.py',
               'checks': [], 'cleanup': False}
     with tempfile.TemporaryDirectory(prefix='erii-codemode-') as temp:
         root = Path(temp)
@@ -189,7 +189,7 @@ return {computer: state.computerId, rejected, privateBridge: !ALL_TOOLS.some(t=>
             with sqlite3.connect(db_path) as db:
                 report['events'] = [json.loads(r[0]) for r in db.execute('SELECT message_json FROM code_event ORDER BY execution_id,attempt_id,sequence')]
                 report['schema_version'] = db.execute('PRAGMA user_version').fetchone()[0]
-            require(report['events'] and report['schema_version'] == 16, 'durable events/migration missing')
+            require(report['events'] and report['schema_version'] == 17, 'durable events/migration missing')
         finally:
             h.cleanup()
     report['cleanup'] = not root.exists()

@@ -171,7 +171,7 @@ func TestNestedAdmissionRejectsUnacceptedParent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = (nestedTools{&tools{r, claim}, "forged-parent"}).Accept(context.Background(), "forged-exchange", []llm.ToolCall{{ID: "1", Name: "builtin__text__echo", Arguments: `{"text":"x"}`}}, a.Registry.Describe())
+	_, err = (nestedTools{&tools{runs: r, claim: claim}, "forged-parent"}).Accept(context.Background(), "forged-exchange", []llm.ToolCall{{ID: "1", Name: "builtin__text__echo", Arguments: `{"text":"x"}`}}, a.Registry.Describe())
 	if err == nil {
 		t.Fatal("accepted forged parent")
 	}

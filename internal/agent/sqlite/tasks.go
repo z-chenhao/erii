@@ -205,7 +205,7 @@ func (t *tools) ExecuteBuiltin(ctx context.Context, inv tool.Invocation) (tool.R
 func (t *tools) executeBuiltin(ctx context.Context, inv tool.Invocation) (tool.Result, error) {
 	result := tool.Failure("PERMISSION_DENIED")
 	err := t.runs.write(ctx, func(tx *sql.Tx) error {
-		if err := fence(ctx, tx, t.claim); err != nil {
+		if err := t.fence(ctx, tx); err != nil {
 			return err
 		}
 		// Resolve the accepted record rather than trusting invocation fields supplied

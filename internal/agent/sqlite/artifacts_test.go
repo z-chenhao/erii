@@ -349,7 +349,7 @@ func TestArtifactMigrationV10Atomicity(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	if idAgent(t, s) != "prior" || scalar(t, s, `PRAGMA user_version`) != 16 || scalar(t, s, `SELECT config_version FROM agent_config`) != 7 {
+	if idAgent(t, s) != "prior" || scalar(t, s, `PRAGMA user_version`) != 17 || scalar(t, s, `SELECT config_version FROM agent_config`) != 7 {
 		t.Fatal("prior state changed")
 	}
 }

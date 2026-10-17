@@ -106,7 +106,15 @@ func open(ctx context.Context, cfg config.Config, fixture string, secrets llm.Se
 	base := task.Registry()
 	defs := append(artifacttools.Definitions(), agent.AgentToolDefinition())
 	if cfg.JavaScript != nil {
-		defs = append(defs, codemode.Definition())
+		runtime := &codemode.Sidecar{Command: cfg.JavaScript.Command, Script: cfg.JavaScript.Script}
+		runtimeHash, preludeHash, e := runtime.Fingerprint()
+		if e != nil {
+			a.Close()
+			return nil, e
+		}
+		definition := codemode.Definition()
+		definition.Spec.ResourceHash += ":" + runtimeHash + ":" + preludeHash
+		defs = append(defs, definition)
 	}
 	for _, server := range cfg.MCP {
 		more, e := mcp.Definitions(ctx, server)
@@ -183,7 +191,7 @@ func open(ctx context.Context, cfg config.Config, fixture string, secrets llm.Se
 	if fixture != "" {
 		path, err := os.Executable()
 		if err == nil {
-			a.provider, err = bridge.OpenObserved(ctx, path, a.accounts.Observer(a.recordGeneration), "-test-provider-bridge", fixture)
+			a.provider, err = bridge.OpenObserved(ctx, path, a.accounts.Observer(a.recordGeneration), "-test-provider-bridge", fixture, filepath.Join(cfg.App.DataRoot, "fake-provider-calls.jsonl"))
 		}
 		if err != nil {
 			a.control.BridgeError = llm.NormalizeError(err.Error())

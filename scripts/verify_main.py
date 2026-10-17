@@ -63,8 +63,8 @@ class MainHarness:
             time.sleep(0.025)
         raise RuntimeError("state boundary not reached: " + description)
 
-    def hold(self, boundary):
-        child = subprocess.Popen(self.args("-test-main-hold", boundary, "chat", "work"),
+    def hold(self, boundary, extra_flags=()):
+        child = subprocess.Popen(self.args("-test-main-hold", boundary, *extra_flags, "chat", "work"),
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                                  env=self.env, cwd=self.root)
         self.children.append(child)

@@ -1,4 +1,4 @@
-# JavaScript Code Mode runtime (ERII-19)
+# JavaScript Code Mode runtime (ERII-19 / ERII-20)
 
 The configured `builtin__codemode__execute` Tool runs one fresh QuickJS VM per
 invocation through the normal Agent Loop and ToolExecutor. Its `source` argument
@@ -14,6 +14,7 @@ Install Node **24.21.0**, then install the exact WASM dependency:
 npm ci --prefix runtime/javascript --ignore-scripts
 make build
 python3 scripts/verify_codemode.py --binary bin/personal-agent --evidence evidence/codemode.json
+python3 scripts/verify_code_recovery.py --binary bin/personal-agent --evidence evidence/code-recovery.json
 ```
 
 The reusable harness owns Launch, Doctor, Drive, Evidence, and Cleanup. It
@@ -125,21 +126,83 @@ per-Tool capacity as direct calls, including conflict exclusion. A configured
 calls still share that one slot. The Loop/Executor and the fixed JavaScript
 limits continue to bound wrapper execution.
 
-## Recovery boundary and remaining work
+## Fixed-source recovery
 
-A waiting nested invocation suspends and disposes the VM; its existing
-ToolInvocation and Child Run remain durable. On an ordinary scheduler wake,
-the current slice can re-run source and reuse the stable ordinal's accepted
-invocation. Host-accepted unawaited calls continue internally. The finished cell output is
-saved while these calls drain through the same Executor; the VM is disposed,
-approval remains actionable, and JavaScript does not execute again. Background
-results do not add outputs to the finished cell. The Parent invocation remains
-recoverable until this drain finishes.
+Schema 17 adds an immutable manifest and versioned execution state behind the
+ordinary Code Mode ToolInvocation. The manifest saves source and explicit
+empty input JSON, hashes both, and binds the model/capability snapshots,
+complete frozen Tools, limits, Runtime/Prelude versions and installed bytes.
+Runtime fingerprints cover Sidecar/Worker/VM sources, package lock and WASM;
+Prelude fingerprints cover both Erii adaptations and the pinned upstream file.
+The registry includes installed Runtime/Prelude hashes in its ResourceHash, so
+Run creation freezes them before any cell starts. Recovery rejects drift.
+No heap or stack is serialized.
 
-This is the ERII-19 runtime slice, **not complete Durable Replay or M5**.
-ERII-20 owns dedicated execution claims/epochs, source-position call keys,
-ordered result-delivery replay, wake drain, full orphan-recovery conformance, comprehensive
-37-completed/8-active Sidecar and Go kill/restart proof, and frozen runtime
-compatibility across recovery. Until those gates pass, do not use this slice as
-an unattended long-running recovery guarantee. ERII-21 owns full due Golden
-Case scoring; the runtime harness does not award semantic scores.
+The trusted Prelude captures the caller's source position. Node derives each
+nested key from the parent Provider call, source hash, position and dynamic
+ordinal at that position. Scripts never see or supply keys. Atomic admission
+binds the key to canonical name/arguments/schema/resolved Tool capabilities,
+and commits CodeCall, ToolInvocation, Child/counters and Outbox together.
+Completed calls reuse durable results; active Children retain their identities.
+Nested effects retain ordinary `safe/query_before_retry/never` recovery;
+`unknown` never becomes permission to retry. Drift fails the whole cell with
+`NON_DETERMINISTIC_REPLAY`, including when script catches ordinary Tool errors.
+
+Host invoke first accepts the call without dispatching it. If work is pending,
+Node destroys the Worker/QuickJS VM. Go then drains accepted work through the
+same ToolExecutor. Long approval/Child waits release both execution and Run
+leases. Further progress rebuilds a fresh VM from the immutable manifest.
+Persisted delivery sequence numbers restore Promise continuation order even
+when transport replies arrive out of order. Store retains versioned JSON with
+a value hash and update time; it is isolated to one invocation. Each Store operation has a trusted source key and an immutable receipt. Replay
+reuses its original read or write, so an earlier load cannot observe a later
+write and repeated replay cannot increment a saved counter. Distinct writes
+to one key still use last-write-wins semantics. Events retain their audit.
+
+Each execution claim increments an epoch and issues a new token subordinate
+to the Run lease. Every Sidecar event, Store access and Host admission checks
+both identities. Run renewal extends the active execution lease. The terminal
+receipt is persisted with its authoritative terminal event before acknowledgement;
+the ordinary ToolExecutor commits the final wrapper result under that owner.
+Old callbacks cannot admit work or commit output.
+
+Authoritative Tool, Child, approval, input, spend and stop transitions increment
+`wake_seq` in their transactions. Release compares its observed sequence with
+the current sequence before entering idle; a change forces another drain.
+The existing Run scheduler scans expired execution claims and unprocessed
+wakes and emits Outbox hints. It remains the sole scheduler.
+
+Normal shutdown interrupts a current VM replay and preserves accepted work.
+User cancellation fences the entire Run tree and settles nested effects through
+the existing cancellation path. Accepted unawaited calls continue after script
+completion. The chosen output is frozen while these calls drain internally;
+their later results do not enter the finished output.
+
+`code_execution_state` records replay starts/hits, epochs, wakes and leases.
+Suspension events record active VM count, Node RSS and elapsed milliseconds.
+`verify_code_recovery.py` kills actual Sidecar and Go processes at exactly 37
+completed and 8 active Children out of 100. It checks independent Fake-provider
+dispatch audits, reattached identities, quotas, final aggregation, memory
+metrics and cleanup. The normal CLI harness covers unawaited work, Store
+isolation, approval rejection and crashes before/after effects. Both harnesses
+run five times in `make verify`. Fake-clock tests advance approval by six hours
+and prove the disposed VM is not retained.
+
+## Upgrade and operations
+
+Install the pinned Node/QuickJS dependencies before starting `chat work`.
+After a crash, run `chat work` with the same installed runtime and configuration;
+a killed Go owner's five-second lease must expire before work is claimed.
+Missing or changed runtime bytes fail closed and leave recovery intent intact.
+Restore the original runtime to continue. Never rewrite source, hashes, claims
+or accepted arguments in the database to force replay.
+
+Migration 17 preserves v16 ledger/Store/events and all earlier state. v1 cells
+lack the v2 replay manifest and source-position identities. They are **not**
+automatically upgraded: finish active v1 trees with their original binary and
+Runtime before deploying v2. Frozen incompatible capabilities are rejected
+rather than switched. Empty/v16 migration, rollback and preservation are tested.
+
+This slice proves deterministic protocol/recovery behavior. It does not award
+Golden Case semantic scores or complete M5; ERII-21 owns the due scored cases.
+The real Computer Driver and macOS compatibility remain M6 work.

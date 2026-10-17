@@ -11,10 +11,10 @@ try {
     post,
     shouldInterrupt: () => Atomics.load(interrupt, 0) !== 0 || ++polls > workerData.interruptBudget,
     interruptBudget: workerData.interruptBudget,
-    sync(method, args) {
+    sync(method, args, position) {
       const memory = new SharedArrayBuffer(1048584);
       const control = new Int32Array(memory, 0, 2);
-      post({type: 'sync', method, args, memory});
+      post({type: 'sync', method, args, position, memory});
       if (Atomics.wait(control, 0, 0, workerData.timeoutMs) === 'timed-out')
         throw new Error('TIMEOUT');
       const size = Atomics.load(control, 1);

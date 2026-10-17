@@ -481,7 +481,7 @@ func TestRealPriorSchemasUpgradeAndV3Rollback(t *testing.T) {
 					t.Fatal(err)
 				}
 				d, err := s.Diagnostics(ctx)
-				if err != nil || d.AgentID != "preserved-agent" || d.ConfigVersion != 7 || d.SchemaVersion != 16 || d.Readiness != "setup_required" {
+				if err != nil || d.AgentID != "preserved-agent" || d.ConfigVersion != 7 || d.SchemaVersion != 17 || d.Readiness != "setup_required" {
 					t.Fatal("migration changed agent")
 				}
 				var created, updated int64
