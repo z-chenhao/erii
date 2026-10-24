@@ -1,5 +1,9 @@
 # Bounded baseline audits
 
+[baseline-03](baseline-03.md) records ERII-233's 80 frozen blocks, their 347
+sub-obligations, current evidence and remaining routes. Use `make audit-baseline-03`.
+Its completed dispositions do not certify product conformance or release.
+
 [baseline-04](baseline-04.md) records ERII-234's separate 80-block audit of
 account, Bridge, model failure and Code Mode contracts. Its ledger and current
 observations do not change baseline-01 or the preserved historical ledger.

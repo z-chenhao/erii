@@ -12,10 +12,12 @@ import release_package as package
 
 
 class ReleasePackageTests(unittest.TestCase):
+    ledger_path = 'docs/audits/baseline-01.json'
+
     @classmethod
     def setUpClass(cls):
         cls.root = release_audit.ROOT
-        cls.original = json.loads((cls.root / 'docs/audits/baseline-01.json').read_text())
+        cls.original = json.loads((cls.root / cls.ledger_path).read_text())
         cls.units = [dict(source=source, **row)
                      for source in ('docs/technical-design.md', 'evals/golden-cases.md')
                      for row in release_audit.inventory((cls.root / source).read_text())]
@@ -200,6 +202,46 @@ class ReleasePackageTests(unittest.TestCase):
             result = subprocess.run(command + ['--evidence', str(ledger)], capture_output=True, text=True)
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(ledger.read_bytes(), before)
+
+
+class Baseline03Tests(ReleasePackageTests):
+    # Exercise the same production CLI and all corruption cases on this package,
+    # including its multi-line schema fences and mixed current/deferred duties.
+    ledger_path = 'docs/audits/baseline-03.json'
+
+    def test_every_current_duty_is_routed_and_only_explicit_future_work_is_deferred(self):
+        for row in self.ledger['reviews']:
+            if row['disposition'] in ('background', 'deferred'):
+                self.assertTrue(row['reason'])
+                continue
+            deferred = row.get('deferred_obligations', [])
+            deferred_duties = {d['obligation'] for d in deferred}
+            self.assertTrue(all(d['reason'] for d in deferred))
+            remaining = {d['obligation'] for d in row['remaining']}
+            self.assertEqual(set(row['obligation_kinds']), set(row['obligations']))
+            self.assertEqual({o for o, kind in row['obligation_kinds'].items()
+                              if kind == 'deferred'}, deferred_duties)
+            self.assertEqual(set(row['exemptions']), deferred_duties)
+            self.assertEqual({o for o, kind in row['obligation_kinds'].items()
+                              if kind == 'required_v1'}, remaining)
+            self.assertFalse(remaining & deferred_duties)
+            self.assertEqual(set(row['obligations']), remaining | deferred_duties,
+                             f"unaccounted sub-obligation at frozen line {row['line']}")
+        mixed = next(r for r in self.ledger['reviews'] if r['line'] == 539)
+        self.assertEqual(len(mixed['deferred_obligations']), 1)
+        self.assertIn('Device Authorization', mixed['deferred_obligations'][0]['obligation'])
+        self.assertEqual(len(mixed['remaining']), 12)
+
+    def test_schema_fence_and_observed_web_gap_keep_their_independent_duties(self):
+        schema = next(r for r in self.ledger['reviews'] if r['line'] == 446)
+        self.assertEqual(len(schema['obligations']), 38)
+        self.assertIn('ModelCapabilities.audioInput:boolean', schema['obligations'])
+        self.assertIn('AuthConnection.version:number', schema['obligations'])
+        for line in (433, 434):
+            row = next(r for r in self.ledger['reviews'] if r['line'] == line)
+            self.assertEqual(row['disposition'], 'evidence_gap')
+            self.assertEqual({d['gap'] for d in row['remaining']}, {'G-setup'})
+        self.assertEqual(self.ledger['gaps']['G-setup']['issue'], 'ERII-334')
 
 
 if __name__ == '__main__':

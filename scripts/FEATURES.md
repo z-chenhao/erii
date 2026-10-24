@@ -21,6 +21,13 @@ See [unscripted evaluation operations](../docs/guides/unscripted-evals.md).
 See [release evidence operations](../docs/guides/release-evidence.md) for trust,
 private inputs, exit codes and remaining real release obligations.
 
+## Frozen baseline-03 audit (ERII-233)
+
+| Feature | Entry | Authoritative implementation | Evidence |
+| --- | --- | --- | --- |
+| Exact 80-block disposition, §3.11–§5.4 | `make audit-baseline-03` | Existing `release_audit.py`, `release_package.audit_package`, `docs/audits/baseline-03.json` | Owner package digest pinned independently; all 347 authored sub-obligations retained with current code/test hashes, merged PRs, native receipts, explicit background/deferrals and finite gap routes. Web setup gap routes to ERII-334. No verified requirements or release certification. |
+| Integrity and read-only provenance | `python3 -m unittest discover -s scripts -p 'test_release_*.py'`; optional original manifest/native-root/`--verify-git` | `test_release_package.Baseline03Tests` reuses the corruption/CLI suite, plus schema-fence and mixed-deferral coverage | Launch/Doctor frozen inputs and current references; Drive maintained CLI; Evidence `evidence/baseline-03.json`, native flags and immutable local receipts; Cleanup disposable output only. Missing/duplicate/stale/unknown/unmerged/tampered evidence rejects; release-complete still exits 2. [Scope and observations](../docs/audits/baseline-03.md). |
+
 ## Frozen baseline-01 audit (ERII-231)
 
 | Feature | Reach it | Authoritative entry point | Evidence and limits |
