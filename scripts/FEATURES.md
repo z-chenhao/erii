@@ -39,6 +39,15 @@ See the [bounded audit ledger and proof limits](../docs/audits/README.md).
 
 See [baseline-04 observations and routes](../docs/audits/baseline-04.md).
 
+## Frozen baseline-05 audit (ERII-235)
+
+| Feature | Reach it | Authoritative entry point | Evidence and limits |
+| --- | --- | --- | --- |
+| Store, Runtime, Tool and Loop dispositions | `make audit-baseline-05` | Existing `release_audit.py`, `release_package.audit_package`, `docs/audits/baseline-05.json` | Exactly 80 independently pinned blocks and 363 authored sub-obligations, explicit scopes/exemptions, current reference hashes, merged PR provenance, ten native observations and finite routes. Retains heartbeat, per-attempt sequence, interrupted-state and Outcome contract gaps. Mandatory duties remain unmet for release; zero verified requirements. |
+| Integrity and provenance | `python3 -m unittest discover -s scripts -p 'test_release_*.py'`; optional manifest/native-root/`--verify-git` on the existing CLI | `test_release_baseline05.py` reuses maintained rejection contracts and checks mandatory routing, mixed future clauses and explicit gaps | Missing/duplicate/extra or changed blocks, stale references, unmerged PRs, altered native bytes and unexplained exemptions reject. CLI readback preserves all historical reviews and inconclusive release status; no certification path is added. |
+
+See [baseline-05 observations and routes](../docs/audits/baseline-05.md).
+
 Start with the [capability and gate directory](../docs/guides/verification.md).
 `python3 scripts/verify_suite.py --list` reads the authoritative execution inventory;
 `--gate NAME` drives a selected capability with its complete repetition count.

@@ -1,5 +1,10 @@
 # Bounded baseline audits
 
+[baseline-05](baseline-05.md) records ERII-235's separate 80-block audit of Store
+isolation, the JavaScript Host protocol, ToolInvocation and Main runtime messages.
+Its 363 sub-obligations retain explicit scopes, evidence limits and finite routes.
+Use `make audit-baseline-05`; no requirement is certified.
+
 [baseline-04](baseline-04.md) records ERII-234's separate 80-block audit of
 account, Bridge, model failure and Code Mode contracts. Its ledger and current
 observations do not change baseline-01 or the preserved historical ledger.
