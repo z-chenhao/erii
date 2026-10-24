@@ -1,5 +1,14 @@
 # Feature map
 
+## Frozen baseline-06 audit (ERII-236)
+
+| Feature | Reach / authoritative entry point | Evidence and limits |
+| --- | --- | --- |
+| Loop, Child and replay dispositions | `make audit-baseline-06`; existing `release_audit.py` / `release_package.audit_package` | Exactly 80 independently pinned blocks, 282 authored sub-obligations with explicit scopes, current reference hashes, merged PR provenance and four native receipt groups. All mandatory duties stay routed; zero certified requirements. |
+| Integrity and failure paths | `python3 -m unittest discover -s scripts -p 'test_release_*.py'`; `test_release_baseline06.py` reuses shared rejection contracts | Missing/duplicate/drifted blocks, stale references, unsupported exemptions, unrouted duties and invented PASS reject. CLI output cleanup and optional manifest/native/Git checks remain shared. Launch/Doctor read isolated audit inputs; Drive uses the real CLI; Evidence is `evidence/baseline-06.json`; Cleanup removes only disposable output. |
+
+See [baseline-06 observations and routes](../docs/audits/baseline-06.md).
+
 ## Unscripted evaluation entry (ERII-230)
 
 | Feature | Reach / authoritative entry point | Evidence and limits |

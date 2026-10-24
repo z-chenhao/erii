@@ -1,5 +1,10 @@
 # Bounded baseline audits
 
+[baseline-06](baseline-06.md) records ERII-236's separate 80-block audit of
+Loop messages/events, Child API, shared Tool execution and frozen replay.
+Its per-obligation evidence and finite gap routes do not certify release or
+alter previous package ledgers.
+
 [baseline-04](baseline-04.md) records ERII-234's separate 80-block audit of
 account, Bridge, model failure and Code Mode contracts. Its ledger and current
 observations do not change baseline-01 or the preserved historical ledger.
